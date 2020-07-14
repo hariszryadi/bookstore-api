@@ -18,4 +18,9 @@ class Book extends Model
         'stock',
         'status'
     ];
+
+    public function categories()
+    {
+        return $this->belongsToMany('App\Models\Category');
+    }
 }
