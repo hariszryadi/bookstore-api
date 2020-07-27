@@ -8,7 +8,10 @@ use App\Http\Resources\Cities as CityResourceCollection;
 use App\Models\Province;
 use App\Models\City;
 use App\Models\Book;
+use App\Models\Order;
+use App\Models\BookOrder;
 use Auth;
+use DB;
 
 class ShopController extends Controller
 {
@@ -222,5 +225,155 @@ class ShopController extends Controller
             'error' => $error,
             'response' => $response
         ];
+    }
+
+    public function payment(Request $request)
+    {
+        $error = 0;
+        $status = "error";
+        $message = "";
+        $data = [];
+        $user = Auth::user();
+        if ($user) {
+            $this->validate($request, [
+                'courier' => 'required',
+                'service' => 'required',
+                'carts' => 'required'
+            ]);
+
+            DB::beginTransaction();
+            try {
+                $origin = 153;
+                $destination = $user->city_id;
+                if ($destination<=0) {
+                    $error++;
+                }
+                $courier = $request->courier;
+                $service = $request->service;
+                $carts = json_decode($request->carts, true);
+                // create order
+                $order = new Order;
+                $order->user_id = $user->id;
+                $order->total_price = 0;
+                $order->invoice_number = date('YmdHis');
+                $order->courier_service = $courier . '_' . $service;
+                $order->status = 'SUBMIT';
+                if ($order->save()) {
+                    $total_price = 0;
+                    $total_weight = 0;
+                    foreach ($carts as $cart) {
+                        $id = (int)$cart['id'];
+                        $quantity = (int)$cart['quantity'];
+                        $book = Book::find($id);
+                        if ($book) {
+                            if ($book->stock >= $quantity) {
+                                $total_price += $book->price * $quantity;
+                                $total_weight += $book->weight * $quantity;
+                                // create book order
+                                $book_order = new BookOrder;
+                                $book_order->book_id = $book->id;
+                                $book_order->order_id = $order->id;
+                                $book_order->quantity = $quantity;
+                                if ($book_order->save()) {
+                                    $book->stock = $book->stock - $quantity;
+                                    $book->save();
+                                }
+                            } else {
+                                $error++;
+                                throw new \Exception('Out of stock');
+                            }
+                        } else {
+                            $error++;
+                            throw new \Exception('Book is not found');
+                        }
+                    }
+
+                    $totalBill = 0;
+                    $weight = $total_weight * 1000;
+                    if ($weight<=0) {
+                        $error++;
+                        throw new \Exception('Weight null');
+                    }
+
+                    $data = [
+                        "origin" => $origin,
+                        "destination" => $destination,
+                        "weight" => $weight,
+                        "courier" => $courier
+                    ];
+
+                    $data_cost = $this->getServices($data);
+                    if ($data_cost['error']) {
+                        $error++;
+                        throw new \Exception('Courier service unavailable');
+                    }
+
+                    $response = json_decode($data_cost['response']);
+                    $costs = $response->rajaongkir->results[0]->costs;
+                    $service_cost = 0;
+                    foreach ($costs as $cost) {
+                        $service_name = $cost->service;
+                        if ($service == $service_name) {
+                            $service_cost = $cost->cost[0]->value;
+                            break;
+                        }
+                    }
+                    if ($service_cost<=0) {
+                        $error++;
+                        throw new \Exception('Service cost invalid');
+                    }
+                    $total_bill = $total_price + $service_cost;
+                    // update total bill order
+                    $order->total_price = $total_bill;
+                    if ($order->save()) {
+                        if ($error==0) {
+                            DB::commit();
+                            $status = 'success';
+                            $message = 'Transaction success';
+                            $data = [
+                                'order_id' => $order->id,
+                                'total_price' => $total_bill,
+                                'invoice_number' => $order->invoice_number
+                            ];
+                        } else {
+                            $message = 'There are ' . $error . ' errors';
+                        }
+                    }
+                }
+            } catch (\Exception $e) {
+                $message = $e->getMessage();
+                DB::rollback();
+            }
+        } else {
+            $message = "User not found";
+        }
+
+        return response()->json([
+            'status' => $status,
+            'message' => $message,
+            'data' => $data
+        ], 200);
+    }
+
+    public function myOrder(Request $request)
+    {
+        $user = Auth::user();
+        $status = "error";
+        $message = "";
+        $data = [];
+        if ($user) {
+            $orders = Order::select('*')->where('user_id', '=', $user->id)->orderBy('id', 'DESC')->get();
+            $status = "success";
+            $message = "data my order";
+            $data = $orders;
+        } else {
+            $message = "User not found";
+        }
+
+        return response()->json([
+            'status' => $status,
+            'message' => $message,
+            'data' => $data
+        ], 200);
     }
 }
